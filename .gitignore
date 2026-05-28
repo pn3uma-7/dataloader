@@ -5,6 +5,8 @@ node_modules/
 backend/.env
 frontend/.env.local
 frontend/.env.*.local
+.env.dev
+.env.qa
 
 # Build outputs
 dist/

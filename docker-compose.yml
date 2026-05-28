@@ -1,0 +1,29 @@
+services:
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      AWS_REGION: ${AWS_REGION}
+      S3_BUCKET: ${S3_BUCKET}
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID}
+      COGNITO_APP_CLIENT_ID: ${COGNITO_APP_CLIENT_ID}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      PORT: 3000
+      NODE_ENV: production
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_COGNITO_USER_POOL_ID: ${VITE_COGNITO_USER_POOL_ID}
+        VITE_COGNITO_APP_CLIENT_ID: ${VITE_COGNITO_APP_CLIENT_ID}
+        VITE_COGNITO_DOMAIN: ${VITE_COGNITO_DOMAIN}
+    ports:
+      - "${APP_PORT}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
