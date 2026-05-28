@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "S3DataBucketAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::REPLACE_WITH_DEV_BUCKET_NAME/*",
+        "arn:aws:s3:::REPLACE_WITH_QA_BUCKET_NAME/*"
+      ]
+    },
+    {
+      "Sid": "S3DataBucketList",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": [
+        "arn:aws:s3:::REPLACE_WITH_DEV_BUCKET_NAME",
+        "arn:aws:s3:::REPLACE_WITH_QA_BUCKET_NAME"
+      ]
+    }
+  ]
+}
