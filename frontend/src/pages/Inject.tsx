@@ -503,6 +503,16 @@ export default function Inject() {
             </div>
           ) : null}
 
+          {/* Primary key warning */}
+          {columns.length > 0 && !columns.some((c) => c.primary_key) && progress.phase === 'idle' && (
+            <div className="flex items-start gap-2 bg-yellow-50 border border-yellow-300 rounded-lg px-4 py-3">
+              <span className="text-yellow-500 text-base leading-5 flex-shrink-0">⚠</span>
+              <p className="text-sm text-yellow-800">
+                No primary key selected — the first column is usually the ID. Select one before injecting.
+              </p>
+            </div>
+          )}
+
           {/* Progress steps */}
           {progress.phase !== 'idle' && <InjectSteps progress={progress} />}
 
