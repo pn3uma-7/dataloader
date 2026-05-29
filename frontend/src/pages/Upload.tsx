@@ -279,6 +279,7 @@ interface UploadProgress {
   totalBytes: number;
   errorMessage?: string;
   skippedRows?: number;
+  safeToLeave?: boolean;
 }
 
 function UploadSteps({ progress }: { progress: UploadProgress }) {
@@ -308,6 +309,11 @@ function UploadSteps({ progress }: { progress: UploadProgress }) {
           </p>
           {!step1Done && !isError && (
             <div className="mt-2 space-y-1">
+              {progress.safeToLeave ? (
+                <p className="text-xs text-green-600 font-medium">✓ File received by server — safe to close this tab</p>
+              ) : (
+                <p className="text-xs text-amber-600 font-medium">⚠ Sending file to server — don't close this tab yet</p>
+              )}
               <div className="w-full bg-gray-200 rounded-full h-2">
                 <div
                   className="bg-blue-500 h-2 rounded-full transition-all duration-200"
@@ -478,7 +484,7 @@ export default function Upload() {
             const step = event.step as string;
 
             if (step === 'received') {
-              setUploadProgress((p) => ({ ...p!, phase: 'uploading', bytesUploaded: 0, totalBytes: event.totalBytes as number }));
+              setUploadProgress((p) => ({ ...p!, phase: 'uploading', bytesUploaded: 0, totalBytes: event.totalBytes as number, safeToLeave: true }));
             } else if (step === 'uploading') {
               setUploadProgress((p) => ({ ...p!, phase: 'uploading', bytesUploaded: event.bytesUploaded as number, totalBytes: event.totalBytes as number }));
             } else if (step === 'saving') {
