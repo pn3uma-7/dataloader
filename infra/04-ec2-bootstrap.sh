@@ -1,42 +1,41 @@
 #!/bin/bash
-# DataLoader — EC2 bootstrap
-# Paste this as EC2 User Data when launching the instance,
-# OR run it manually after SSH-ing in as ec2-user.
+# DataLoader — EC2 bootstrap (Amazon Linux 2023)
+# Run manually after connecting via EC2 Instance Connect.
+# Tested: Amazon Linux 2023, t3.micro, ap-south-1, May 2026.
 #
-# What this does:
-#   1. Installs Docker + Docker Compose v2
-#   2. Clones the app repo
-#   3. Prints next steps
-#
-# Security group requirements (configure in AWS Console):
-#   Inbound:  port 22   (SSH)   — your office / VPN IP only
-#             port 8080 (dev)   — your office / VPN IP only
-#             port 8081 (QA)    — your office / VPN IP only
-#   Outbound: all (default) — needed to reach S3, RDS, Cognito
-#
-# RDS security group must allow inbound 5432 from this EC2's security group.
+# Pre-requisites (done in AWS Console before running this):
+#   - EC2 security group: inbound 22 + 8080 from 0.0.0.0/0
+#   - IAM role with S3 read/write attached to EC2
+#   - RDS security group: inbound 5432 from EC2 security group
+#   - CloudFront distribution pointing to ec2-<ip>.<region>.compute.amazonaws.com:8080
+#   - Cognito callback URLs updated with https://<cloudfront-domain>/
 
 set -e
 
-# ── 1. Install Docker ────────────────────────────────────────────────────────
-yum update -y
-yum install -y docker git
-systemctl enable docker
-systemctl start docker
-usermod -aG docker ec2-user
+# ── 1. Install Docker (Amazon Linux 2023 native package) ─────────────────────
+sudo dnf install -y docker git
+sudo systemctl enable docker
+sudo systemctl start docker
+sudo usermod -aG docker ec2-user
 
-# ── 2. Install Docker Compose v2 ─────────────────────────────────────────────
-mkdir -p /usr/local/lib/docker/cli-plugins
-curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+# ── 2. Install Docker Compose v2 (pinned version — latest URL is unreliable) ──
+sudo mkdir -p /usr/local/lib/docker/cli-plugins
+
+sudo curl -SL "https://github.com/docker/compose/releases/download/v2.29.0/docker-compose-linux-x86_64" \
   -o /usr/local/lib/docker/cli-plugins/docker-compose
-chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
-# ── 3. Clone repo ────────────────────────────────────────────────────────────
+# ── 3. Install Docker Buildx (pinned version) ────────────────────────────────
+sudo curl -SL "https://github.com/docker/buildx/releases/download/v0.16.2/buildx-v0.16.2.linux-amd64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-buildx
+sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+
+# ── 4. Clone repo ────────────────────────────────────────────────────────────
 cd /home/ec2-user
 git clone https://github.com/aqilliz-dev/data-uploader-application.git dataloader
-chown -R ec2-user:ec2-user dataloader
+sudo chown -R ec2-user:ec2-user dataloader
 
-# ── 4. Print next steps ───────────────────────────────────────────────────────
+# ── 5. Print next steps ───────────────────────────────────────────────────────
 echo ""
 echo "========================================================="
 echo "Bootstrap complete. Next steps (as ec2-user):"
@@ -45,17 +44,12 @@ echo "  cd ~/dataloader"
 echo "  cp .env.dev.example .env.dev   # fill in real values"
 echo "  cp .env.qa.example  .env.qa    # fill in real values"
 echo ""
-echo "  # Run DB migrations (once per database)"
-echo "  psql -h <rds-host> -U <user> -d dataloader_dev -f db/001_create_log_tables.sql"
-echo "  psql -h <rds-host> -U <user> -d dataloader_dev -f db/002_add_skipped_rows.sql"
-echo "  psql -h <rds-host> -U <user> -d dataloader_qa  -f db/001_create_log_tables.sql"
-echo "  psql -h <rds-host> -U <user> -d dataloader_qa  -f db/002_add_skipped_rows.sql"
+echo "  # Start dev (port 8080)"
+echo "  sudo docker compose --env-file .env.dev -p dataloader-dev up -d --build"
 echo ""
-echo "  # Start both environments"
-echo "  docker compose --env-file .env.dev -p dataloader-dev up -d --build"
-echo "  docker compose --env-file .env.qa  -p dataloader-qa  up -d --build"
+echo "  # Start QA (port 8081)"
+echo "  sudo docker compose --env-file .env.qa -p dataloader-qa up -d --build"
 echo ""
-echo "  # Access"
-echo "  DEV: http://<this-ec2-ip>:8080"
-echo "  QA:  http://<this-ec2-ip>:8081"
+echo "  # Access via CloudFront HTTPS domain (required for Cognito)"
+echo "  https://<cloudfront-domain>/"
 echo "========================================================="
