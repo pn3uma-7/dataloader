@@ -39,6 +39,12 @@ export async function apiGet<T>(path: string): Promise<T> {
   return handleResponse<T>(res);
 }
 
+export async function apiDelete<T>(path: string): Promise<T> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers });
+  return handleResponse<T>(res);
+}
+
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const authHeaders = await getAuthHeaders();
   const res = await fetch(`${BASE}${path}`, {

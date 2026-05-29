@@ -1,4 +1,4 @@
-import { S3Client, GetObjectCommand, ListObjectsV2Command, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, ListObjectsV2Command, HeadObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { Readable } from 'stream';
 
@@ -57,6 +57,10 @@ export async function listS3Uploads(): Promise<S3ObjectInfo[]> {
 export async function getS3ObjectSize(key: string): Promise<number> {
   const resp = await s3.send(new HeadObjectCommand({ Bucket: bucket(), Key: key }));
   return resp.ContentLength ?? 0;
+}
+
+export async function deleteS3Object(key: string): Promise<void> {
+  await s3.send(new DeleteObjectCommand({ Bucket: bucket(), Key: key }));
 }
 
 export async function getS3Preview(key: string, maxBytes = 8192): Promise<string> {

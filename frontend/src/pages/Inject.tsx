@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ColumnEditor from '../components/ColumnEditor';
 import Papa from 'papaparse';
-import { apiGet, getAuthHeaders } from '../lib/api';
+import { apiGet, apiDelete, getAuthHeaders } from '../lib/api';
 import { ActiveInjectsPanel, ActiveUploadsPanel } from '../components/ActiveOperations';
 import type { Column, S3File, Upload, UploadResponse } from '../types';
 
@@ -150,6 +150,37 @@ function InjectSteps({ progress }: { progress: InjectProgress }) {
   );
 }
 
+function DeleteButton({ s3Key, confirmingDeleteKey, deletingKey, onAskConfirm, onConfirm, onCancel }: {
+  s3Key: string;
+  confirmingDeleteKey: string | null;
+  deletingKey: string | null;
+  onAskConfirm: (key: string) => void;
+  onConfirm: (key: string) => void;
+  onCancel: () => void;
+}) {
+  if (deletingKey === s3Key) {
+    return <span className="px-4 text-xs text-gray-400">Deleting…</span>;
+  }
+  if (confirmingDeleteKey === s3Key) {
+    return (
+      <div className="flex items-center gap-2 px-3">
+        <span className="text-xs text-gray-500">Delete?</span>
+        <button onClick={() => onConfirm(s3Key)} className="text-xs text-red-600 font-medium hover:text-red-800">Yes</button>
+        <button onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">No</button>
+      </div>
+    );
+  }
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); onAskConfirm(s3Key); }}
+      className="px-4 text-gray-300 hover:text-red-500 transition-colors text-lg leading-none"
+      title="Delete from S3"
+    >
+      ×
+    </button>
+  );
+}
+
 export default function Inject() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -164,6 +195,8 @@ export default function Inject() {
   const [tableName, setTableName] = useState('');
   const [progress, setProgress] = useState<InjectProgress>({ phase: 'idle' });
   const [inferringColumns, setInferringColumns] = useState(false);
+  const [confirmingDeleteKey, setConfirmingDeleteKey] = useState<string | null>(null);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
 
   const injecting = !['idle', 'done', 'error'].includes(progress.phase);
 
@@ -197,6 +230,25 @@ export default function Inject() {
       // Leave columns empty; user can define them manually
     } finally {
       setInferringColumns(false);
+    }
+  }
+
+  async function handleDeleteFile(key: string) {
+    setDeletingKey(key);
+    setConfirmingDeleteKey(null);
+    try {
+      await apiDelete(`/s3/files?key=${encodeURIComponent(key)}`);
+      setS3Files((prev) => prev.filter((f) => f.key !== key));
+      setUploads((prev) => prev.filter((u) => u.s3_key !== key));
+      if (selectedUpload?.s3_key === key) {
+        setSelectedUpload(null);
+        setColumns([]);
+        setProgress({ phase: 'idle' });
+      }
+    } catch {
+      // leave the file in the list — delete failed silently
+    } finally {
+      setDeletingKey(null);
     }
   }
 
@@ -347,20 +399,22 @@ export default function Inject() {
                       <p className="text-xs text-blue-500 mt-0.5">Uploading to S3… not yet injectable</p>
                     </div>
                   ) : (
-                    <button
-                      key={u.upload_id}
-                      onClick={() => {
-                        setSelectedUpload(u);
-                        setProgress({ phase: 'idle' });
-                        if (u.s3_key) inferColumnsFromS3(u.s3_key);
-                      }}
-                      className="w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors"
-                    >
-                      <p className="font-medium text-gray-800 text-sm">{u.filename}</p>
-                      <p className="text-xs text-gray-400">
-                        {new Date(u.uploaded_at).toLocaleString()} · {u.uploaded_by}
-                      </p>
-                    </button>
+                    <div key={u.upload_id} className="flex items-center hover:bg-gray-50 transition-colors">
+                      <button
+                        onClick={() => {
+                          setSelectedUpload(u);
+                          setProgress({ phase: 'idle' });
+                          if (u.s3_key) inferColumnsFromS3(u.s3_key);
+                        }}
+                        className="flex-1 text-left px-4 py-3"
+                      >
+                        <p className="font-medium text-gray-800 text-sm">{u.filename}</p>
+                        <p className="text-xs text-gray-400">
+                          {new Date(u.uploaded_at).toLocaleString()} · {u.uploaded_by}
+                        </p>
+                      </button>
+                      {u.s3_key && <DeleteButton s3Key={u.s3_key} confirmingDeleteKey={confirmingDeleteKey} deletingKey={deletingKey} onAskConfirm={setConfirmingDeleteKey} onConfirm={handleDeleteFile} onCancel={() => setConfirmingDeleteKey(null)} />}
+                    </div>
                   );
                 })}
 
@@ -375,19 +429,21 @@ export default function Inject() {
                       </div>
                     )}
                     {s3OnlyFiles.map((f) => (
-                      <button
-                        key={f.key}
-                        onClick={() => selectS3File(f)}
-                        className="w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-mono">S3</span>
-                          <p className="font-medium text-gray-800 text-sm">{f.filename}</p>
-                        </div>
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          {new Date(f.last_modified).toLocaleString()} · {fmt(f.size_bytes)}
-                        </p>
-                      </button>
+                      <div key={f.key} className="flex items-center hover:bg-gray-50 transition-colors">
+                        <button
+                          onClick={() => selectS3File(f)}
+                          className="flex-1 text-left px-4 py-3"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-mono">S3</span>
+                            <p className="font-medium text-gray-800 text-sm">{f.filename}</p>
+                          </div>
+                          <p className="text-xs text-gray-400 mt-0.5">
+                            {new Date(f.last_modified).toLocaleString()} · {fmt(f.size_bytes)}
+                          </p>
+                        </button>
+                        <DeleteButton s3Key={f.key} confirmingDeleteKey={confirmingDeleteKey} deletingKey={deletingKey} onAskConfirm={setConfirmingDeleteKey} onConfirm={handleDeleteFile} onCancel={() => setConfirmingDeleteKey(null)} />
+                      </div>
                     ))}
                   </>
                 )}
