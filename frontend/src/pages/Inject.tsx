@@ -8,6 +8,35 @@ import type { Column, S3File, Upload, UploadResponse } from '../types';
 
 const TABLE_NAME_RE = /^[a-z][a-z0-9_]*$/;
 
+// ── Preview types ────────────────────────────────────────────────────────────
+
+interface PreviewTypeError {
+  column: string;
+  pgType: string;
+  count: number;
+  examples: string[];
+}
+
+interface InjectPreviewResult {
+  rowCount: number;
+  badRowCount: number;
+  typeErrors: PreviewTypeError[];
+  headers: string[];
+  sampleRows: string[][];
+  badRowNums: number[];
+}
+
+type PreviewPhase = 'idle' | 'scanning' | 'done' | 'error';
+
+interface PreviewProgress {
+  phase: PreviewPhase;
+  rowsScanned?: number;
+  result?: InjectPreviewResult;
+  errorMessage?: string;
+}
+
+// ── Inject types ─────────────────────────────────────────────────────────────
+
 type InjectPhase = 'idle' | 'validating' | 'table_created' | 'streaming' | 'done' | 'error';
 
 interface InjectProgress {
@@ -150,6 +179,79 @@ function InjectSteps({ progress }: { progress: InjectProgress }) {
   );
 }
 
+function PreviewPanel({ preview }: { preview: PreviewProgress }) {
+  if (preview.phase === 'scanning') {
+    return (
+      <div className="flex items-center gap-2 text-sm text-gray-500 py-1">
+        <span className="w-4 h-4 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin flex-shrink-0" />
+        Scanning file… {preview.rowsScanned ? `(${preview.rowsScanned.toLocaleString()} rows checked)` : ''}
+      </div>
+    );
+  }
+
+  if (preview.phase === 'error') {
+    return (
+      <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+        <p className="text-sm font-medium text-red-700">✕ Preview failed — {preview.errorMessage}</p>
+      </div>
+    );
+  }
+
+  if (preview.phase !== 'done' || !preview.result) return null;
+
+  const { result } = preview;
+  const hasErrors = result.typeErrors.length > 0;
+
+  return (
+    <div className={`rounded-lg border px-4 py-3 space-y-3 ${hasErrors ? 'bg-yellow-50 border-yellow-300' : 'bg-green-50 border-green-200'}`}>
+      <p className={`text-sm font-medium ${hasErrors ? 'text-yellow-800' : 'text-green-700'}`}>
+        {hasErrors
+          ? `⚠ ${result.rowCount.toLocaleString()} rows scanned — ${result.badRowCount.toLocaleString()} row${result.badRowCount > 1 ? 's' : ''} have type mismatches`
+          : `✓ ${result.rowCount.toLocaleString()} rows scanned — no type issues found`}
+      </p>
+
+      {result.typeErrors.map((err, i) => (
+        <div key={i} className="text-sm">
+          <p className="font-medium text-yellow-800">
+            ⚠ {err.count.toLocaleString()} value{err.count > 1 ? 's' : ''} in "{err.column}" don't match {err.pgType}
+          </p>
+          <ul className="mt-1 ml-4 space-y-0.5">
+            {err.examples.map((ex, j) => (
+              <li key={j} className="text-xs text-gray-500 font-mono">{ex}</li>
+            ))}
+          </ul>
+        </div>
+      ))}
+
+      {result.sampleRows.length > 0 && (
+        <div>
+          <p className="text-xs font-semibold text-gray-500 mb-1">First {result.sampleRows.length} rows</p>
+          <div className="overflow-x-auto rounded border border-gray-200">
+            <table className="text-xs w-full">
+              <thead className="bg-gray-50">
+                <tr>
+                  {result.headers.map((h) => (
+                    <th key={h} className="px-2 py-1 text-left font-mono font-medium text-gray-600 border-r border-gray-200 last:border-0">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {result.sampleRows.map((row, i) => (
+                  <tr key={i}>
+                    {row.map((cell, j) => (
+                      <td key={j} className="px-2 py-1 font-mono text-gray-700 border-r border-gray-200 last:border-0 max-w-xs truncate">{cell}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DeleteButton({ s3Key, confirmingDeleteKey, deletingKey, onAskConfirm, onConfirm, onCancel }: {
   s3Key: string;
   confirmingDeleteKey: string | null;
@@ -202,6 +304,7 @@ export default function Inject() {
   const [inferringColumns, setInferringColumns] = useState(false);
   const [confirmingDeleteKey, setConfirmingDeleteKey] = useState<string | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [preview, setPreview] = useState<PreviewProgress>({ phase: 'idle' });
 
   const injecting = !['idle', 'done', 'error'].includes(progress.phase);
 
@@ -216,6 +319,7 @@ export default function Inject() {
 
   async function inferColumnsFromS3(s3Key: string) {
     setColumns([]);
+    setPreview({ phase: 'idle' });
     setInferringColumns(true);
     try {
       const { text } = await apiGet<{ text: string }>(`/s3/preview?key=${encodeURIComponent(s3Key)}`);
@@ -257,6 +361,48 @@ export default function Inject() {
     }
   }
 
+  async function handlePreview() {
+    if (!selectedUpload) return;
+    setPreview({ phase: 'scanning', rowsScanned: 0 });
+
+    const headers = await getAuthHeaders();
+    const response = await fetch('/api/inject/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ s3_key: selectedUpload.s3_key, columns }),
+    });
+
+    if (!response.ok || !response.body) {
+      setPreview({ phase: 'error', errorMessage: `HTTP ${response.status}` });
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() ?? '';
+      for (const part of parts) {
+        for (const line of part.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          const event = JSON.parse(line.slice(6)) as Record<string, unknown>;
+          if (event.step === 'scanning') {
+            setPreview({ phase: 'scanning', rowsScanned: event.rowsScanned as number });
+          } else if (event.step === 'done') {
+            setPreview({ phase: 'done', result: event as unknown as InjectPreviewResult });
+          } else if (event.step === 'error') {
+            setPreview({ phase: 'error', errorMessage: event.message as string });
+          }
+        }
+      }
+    }
+  }
+
   async function selectS3File(f: S3File) {
     setSelectedUpload({
       upload_id: null,
@@ -274,7 +420,7 @@ export default function Inject() {
       ? 'Use lowercase letters, numbers, and underscores only'
       : null;
 
-  async function handleInject() {
+  async function handleInject(skipRowNums?: number[]) {
     if (!selectedUpload || !tableName || tableNameError) return;
     setProgress({ phase: 'validating' });
 
@@ -287,6 +433,7 @@ export default function Inject() {
         s3_key: selectedUpload.s3_key,
         table_name: tableName,
         columns,
+        skip_row_nums: skipRowNums,
       }),
     });
 
@@ -465,7 +612,7 @@ export default function Inject() {
             <label className="block text-sm font-medium text-gray-700 mb-1">Target table name</label>
             <input
               value={tableName}
-              onChange={(e) => setTableName(e.target.value.toLowerCase())}
+              onChange={(e) => { setTableName(e.target.value.toLowerCase()); setPreview({ phase: 'idle' }); }}
               placeholder="e.g. customers_2026"
               disabled={injecting}
               className={`border rounded-lg px-3 py-2 text-sm font-mono w-72 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50 ${
@@ -513,19 +660,73 @@ export default function Inject() {
             </div>
           )}
 
+          {/* Preview panel */}
+          {preview.phase !== 'idle' && progress.phase === 'idle' && (
+            <PreviewPanel preview={preview} />
+          )}
+
           {/* Progress steps */}
           {progress.phase !== 'idle' && <InjectSteps progress={progress} />}
 
-          {/* Inject button */}
-          {(progress.phase === 'idle' || progress.phase === 'error') && (
-            <button
-              onClick={handleInject}
-              disabled={injecting || !tableName || !!tableNameError || columns.length === 0}
-              className="bg-blue-600 text-white px-6 py-2.5 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Inject into RDS
-            </button>
-          )}
+          {/* Action buttons */}
+          {progress.phase === 'idle' && !injecting && (() => {
+            const previewDone = preview.phase === 'done' && !!preview.result;
+            const hasTypeErrors = previewDone && preview.result!.typeErrors.length > 0;
+            const canPreview = columns.length > 0 && !!tableName && !tableNameError;
+            const isPreviewing = preview.phase === 'scanning';
+
+            return (
+              <div className="space-y-3">
+                {/* Preview button — always shown until preview is done */}
+                {!previewDone && (
+                  <button
+                    onClick={handlePreview}
+                    disabled={!canPreview || isPreviewing}
+                    className="bg-gray-700 text-white px-6 py-2.5 rounded-lg font-medium hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {isPreviewing ? 'Scanning…' : 'Preview'}
+                  </button>
+                )}
+
+                {/* Re-preview button after preview is done */}
+                {previewDone && (
+                  <button
+                    onClick={() => { setPreview({ phase: 'idle' }); }}
+                    className="text-sm text-gray-500 underline"
+                  >
+                    Re-run preview
+                  </button>
+                )}
+
+                {/* Inject buttons — only shown after preview */}
+                {previewDone && (
+                  <div className="space-y-2">
+                    <button
+                      onClick={() => handleInject()}
+                      disabled={hasTypeErrors}
+                      className="bg-blue-600 text-white px-6 py-2.5 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Inject into RDS
+                    </button>
+
+                    {hasTypeErrors && (
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => handleInject(preview.result!.badRowNums)}
+                          className="bg-amber-500 text-white px-6 py-2.5 rounded-lg font-medium hover:bg-amber-600 transition-colors text-sm"
+                        >
+                          Skip {preview.result!.badRowCount.toLocaleString()} invalid rows & inject
+                        </button>
+                        <span className="text-xs text-gray-400">
+                          {(preview.result!.rowCount - preview.result!.badRowCount).toLocaleString()} clean rows will be injected
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {injecting && (
             <button disabled className="bg-blue-600 text-white px-6 py-2.5 rounded-lg font-medium opacity-50 cursor-not-allowed">

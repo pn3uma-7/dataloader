@@ -4,6 +4,8 @@ import { from as copyFrom } from 'pg-copy-streams';
 import { extractUser } from '../middleware/auth';
 import { getS3Stream, getS3ObjectSize } from '../s3';
 import { createTrimmingTransform } from '../lib/trimCsv';
+import { createFilterRowsTransform } from '../lib/filterRows';
+import { validateColumnType } from '../lib/typeValidator';
 import { getPool } from '../db';
 import { activeJobs } from '../lib/activeJobs';
 
@@ -29,11 +31,12 @@ router.post('/inject', extractUser, async (req, res) => {
     if (!res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`);
   };
 
-  const { upload_id, s3_key, table_name, columns } = req.body as {
+  const { upload_id, s3_key, table_name, columns, skip_row_nums } = req.body as {
     upload_id: number | null;
     s3_key: string;
     table_name: string;
     columns: ColumnDef[];
+    skip_row_nums?: number[];
   };
 
   const { email, groups } = req.user!;
@@ -132,6 +135,7 @@ router.post('/inject', extractUser, async (req, res) => {
     const ingestStream = client.query(
       copyFrom(`COPY "${table_name}" FROM STDIN WITH (FORMAT csv, HEADER true)`),
     );
+    const skipSet = new Set(skip_row_nums ?? []);
 
     let bytesStreamed = 0;
     let lastSentBytes = 0;
@@ -161,7 +165,13 @@ router.post('/inject', extractUser, async (req, res) => {
       progressTracker.on('error', reject);
       ingestStream.on('error', reject);
       ingestStream.on('finish', resolve);
-      s3Stream.pipe(trimmer).pipe(progressTracker).pipe(ingestStream);
+      if (skipSet.size > 0) {
+        const filter = createFilterRowsTransform(skipSet);
+        filter.on('error', reject);
+        s3Stream.pipe(filter).pipe(trimmer).pipe(progressTracker).pipe(ingestStream);
+      } else {
+        s3Stream.pipe(trimmer).pipe(progressTracker).pipe(ingestStream);
+      }
     });
 
     const rowCount: number = (ingestStream as unknown as { rowCount: number }).rowCount ?? 0;
@@ -193,6 +203,95 @@ router.post('/inject', extractUser, async (req, res) => {
     res.end();
   } finally {
     client.release();
+  }
+});
+
+router.post('/inject/preview', extractUser, async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (event: object) => {
+    if (!res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+
+  const { s3_key, columns } = req.body as { s3_key: string; columns: ColumnDef[] };
+
+  if (!s3_key || !Array.isArray(columns) || columns.length === 0) {
+    send({ step: 'error', message: 'Missing s3_key or columns' });
+    res.end();
+    return;
+  }
+
+  try {
+    const s3Stream = await getS3Stream(s3_key);
+
+    let headerDone = false;
+    let headers: string[] = [];
+    let rowNum = 0;
+    const sampleRows: string[][] = [];
+    const typeErrors = new Map<string, { pgType: string; count: number; examples: string[] }>();
+    const badRowNums: number[] = [];
+    let leftover = '';
+
+    const processLine = (line: string) => {
+      if (!line) return;
+      if (!headerDone) {
+        headers = line.split(',').map((h) => h.trim().replace(/^"|"$/g, ''));
+        headerDone = true;
+        return;
+      }
+      rowNum++;
+      const values = line.split(',').map((v) => v.trim().replace(/^"|"$/g, ''));
+      let rowHasError = false;
+
+      for (let i = 0; i < columns.length; i++) {
+        const col = columns[i];
+        const value = values[i] ?? '';
+        if (!value || col.type === 'VARCHAR' || col.type === 'BOOLEAN') continue;
+        if (!validateColumnType(value, col.type)) {
+          const entry = typeErrors.get(col.name) ?? { pgType: col.type, count: 0, examples: [] };
+          entry.count++;
+          if (entry.examples.length < 5) entry.examples.push(`row ${rowNum}, "${col.name}" = "${value}"`);
+          typeErrors.set(col.name, entry);
+          rowHasError = true;
+        }
+      }
+
+      if (rowHasError) badRowNums.push(rowNum);
+      if (sampleRows.length < 5) sampleRows.push(values);
+      if (rowNum % 10_000 === 0) send({ step: 'scanning', rowsScanned: rowNum });
+    };
+
+    await new Promise<void>((resolve, reject) => {
+      s3Stream.on('error', reject);
+      s3Stream.on('data', (chunk: Buffer) => {
+        const lines = (leftover + chunk.toString('utf8')).split('\n');
+        leftover = lines.pop() ?? '';
+        for (const raw of lines) processLine(raw.endsWith('\r') ? raw.slice(0, -1) : raw);
+      });
+      s3Stream.on('end', () => {
+        if (leftover) processLine(leftover.endsWith('\r') ? leftover.slice(0, -1) : leftover);
+        resolve();
+      });
+    });
+
+    send({
+      step: 'done',
+      rowCount: rowNum,
+      badRowCount: badRowNums.length,
+      typeErrors: [...typeErrors.entries()].map(([column, d]) => ({
+        column, pgType: d.pgType, count: d.count, examples: d.examples,
+      })),
+      headers,
+      sampleRows,
+      badRowNums,
+    });
+    res.end();
+  } catch (err) {
+    send({ step: 'error', message: err instanceof Error ? err.message : 'Preview failed' });
+    res.end();
   }
 });
 
