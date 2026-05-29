@@ -35,6 +35,19 @@ const MAX_EXAMPLES = 5;
 // Literal strings treated as "null" in data — blocked as hard errors
 const NULL_LIKE = new Set(['null', 'none', 'n/a', 'na', 'nil', 'undefined', 'nan']);
 
+// Dangerous characters that break CSV structure — blocked in all non-ID columns
+const DANGEROUS_RE = /[,"\n\r]/;
+
+// SHA-256: 64 hex chars. UUID: 8-4-4-4-12 hex groups.
+const SHA256_RE = /^[0-9a-f]{64}$/i;
+const UUID_RE   = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function idFormatRe(firstColName: string): { re: RegExp; label: string } {
+  return firstColName.toLowerCase().includes('device')
+    ? { re: UUID_RE,   label: 'UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)' }
+    : { re: SHA256_RE, label: 'SHA-256 (64-character hex string)' };
+}
+
 function runValidation(
   file: File,
   headers: string[],
@@ -54,17 +67,18 @@ function runValidation(
     issues.push({ severity: 'error', title: `Duplicate column names: ${dupHeaders.join(', ')}` });
   }
 
+  const firstCol = headers[0] ?? '';
+  const { re: formatRe, label: formatLabel } = idFormatRe(firstCol);
+
   let rowNum = 0;
   let blankCount = 0;
   const blankExamples: string[] = [];
   let nullLikeCount = 0;
   const nullLikeExamples: string[] = [];
-  let embeddedSpaceCount = 0;
-  const embeddedSpaceExamples: string[] = [];
-  let specialCharCount = 0;
-  const specialCharExamples: string[] = [];
-  let paddedCount = 0;
-  const paddedExamples: string[] = [];
+  let idFormatCount = 0;
+  const idFormatExamples: string[] = [];
+  let dangerousCharCount = 0;
+  const dangerousCharExamples: string[] = [];
   let dupCount = 0;
   const dupExamples: string[] = [];
   const rowSeen = new Set<string>();
@@ -78,7 +92,6 @@ function runValidation(
       const row = result.data;
       let rowHasError = false;
 
-      // Check all expected columns — catches missing fields (short rows) too
       for (const col of headers) {
         const raw = row[col];
         const str = raw === undefined || raw === null ? '' : String(raw);
@@ -87,42 +100,44 @@ function runValidation(
         if (trimmed === '') {
           blankCount++;
           rowHasError = true;
-          if (blankExamples.length < MAX_EXAMPLES) {
+          if (blankExamples.length < MAX_EXAMPLES)
             blankExamples.push(`row ${rowNum}, column "${col}"`);
-          }
-        } else if (NULL_LIKE.has(trimmed.toLowerCase())) {
+          continue;
+        }
+
+        if (NULL_LIKE.has(trimmed.toLowerCase())) {
           nullLikeCount++;
           rowHasError = true;
-          if (nullLikeExamples.length < MAX_EXAMPLES) {
+          if (nullLikeExamples.length < MAX_EXAMPLES)
             nullLikeExamples.push(`row ${rowNum}, column "${col}" = "${trimmed}"`);
+          continue;
+        }
+
+        if (col === firstCol) {
+          // First column must be a valid hashed ID or device ID
+          if (!formatRe.test(trimmed)) {
+            idFormatCount++;
+            rowHasError = true;
+            if (idFormatExamples.length < MAX_EXAMPLES) {
+              const preview = trimmed.length > 40 ? trimmed.slice(0, 40) + '…' : trimmed;
+              idFormatExamples.push(`row ${rowNum}, column "${col}" = "${preview}"`);
+            }
           }
-        } else if (/\s/.test(trimmed)) {
-          // Embedded whitespace (internal spaces/tabs) — trimming won't fix these
-          embeddedSpaceCount++;
-          rowHasError = true;
-          if (embeddedSpaceExamples.length < MAX_EXAMPLES) {
-            const preview = trimmed.length > 40 ? trimmed.slice(0, 40) + '…' : trimmed;
-            embeddedSpaceExamples.push(`row ${rowNum}, column "${col}" = "${preview}"`);
-          }
-        } else if (/[^a-zA-Z0-9]/.test(trimmed)) {
-          // Non-alphanumeric character (colon, semicolon, symbol, etc.)
-          specialCharCount++;
-          rowHasError = true;
-          if (specialCharExamples.length < MAX_EXAMPLES) {
-            const badChars = [...new Set(trimmed.match(/[^a-zA-Z0-9]/g) ?? [])].join(' ');
-            const preview = trimmed.length > 40 ? trimmed.slice(0, 40) + '…' : trimmed;
-            specialCharExamples.push(`row ${rowNum}, column "${col}" = "${preview}"  [${badChars}]`);
-          }
-        } else if (str !== trimmed) {
-          // Leading/trailing whitespace — auto-trimmed at inject, not a hard error
-          paddedCount++;
-          if (paddedExamples.length < MAX_EXAMPLES) {
-            paddedExamples.push(`row ${rowNum}, column "${col}"`);
+        } else {
+          // Non-ID columns: block only characters that break CSV structure
+          if (DANGEROUS_RE.test(trimmed)) {
+            dangerousCharCount++;
+            rowHasError = true;
+            if (dangerousCharExamples.length < MAX_EXAMPLES) {
+              const badChars = [...new Set(trimmed.match(DANGEROUS_RE) ?? [])].join(' ');
+              const preview = trimmed.length > 40 ? trimmed.slice(0, 40) + '…' : trimmed;
+              dangerousCharExamples.push(`row ${rowNum}, column "${col}" = "${preview}"  [${badChars}]`);
+            }
           }
         }
       }
 
-      // Duplicates — deterministic fingerprint over headers order
+      // Duplicates
       if (rowNum <= MAX_DUP_ROWS) {
         const fp = headers.map((h) => (row[h] ?? '').trim()).join('\x00');
         if (rowSeen.has(fp)) {
@@ -135,7 +150,6 @@ function runValidation(
       }
 
       if (rowHasError) badRowNums.add(rowNum);
-
       if (rowNum % 10_000 === 0) onProgress(rowNum);
     },
     complete: () => {
@@ -156,25 +170,18 @@ function runValidation(
           examples: nullLikeExamples,
         });
       }
-      if (embeddedSpaceCount > 0) {
+      if (idFormatCount > 0) {
         issues.push({
           severity: 'error',
-          title: `${embeddedSpaceCount.toLocaleString()} cell${embeddedSpaceCount > 1 ? 's' : ''} contain embedded whitespace — fix in source CSV (not auto-trimmed)`,
-          examples: embeddedSpaceExamples,
+          title: `${idFormatCount.toLocaleString()} value${idFormatCount > 1 ? 's' : ''} in "${firstCol}" are not valid ${formatLabel}`,
+          examples: idFormatExamples,
         });
       }
-      if (specialCharCount > 0) {
+      if (dangerousCharCount > 0) {
         issues.push({
           severity: 'error',
-          title: `${specialCharCount.toLocaleString()} cell${specialCharCount > 1 ? 's' : ''} contain non-alphanumeric characters — only a–z, A–Z, 0–9 allowed`,
-          examples: specialCharExamples,
-        });
-      }
-      if (paddedCount > 0) {
-        issues.push({
-          severity: 'warning',
-          title: `${paddedCount.toLocaleString()} cell${paddedCount > 1 ? 's' : ''} have leading/trailing spaces — will be auto-trimmed at inject`,
-          examples: paddedExamples,
+          title: `${dangerousCharCount.toLocaleString()} cell${dangerousCharCount > 1 ? 's' : ''} contain characters that break CSV structure ( , " newline )`,
+          examples: dangerousCharExamples,
         });
       }
       if (dupCount > 0) {
@@ -396,6 +403,25 @@ export default function Upload() {
     });
   }
 
+  function buildTrimmedCsv(src: File): Promise<File> {
+    return new Promise((resolve, reject) => {
+      const allRows: string[][] = [];
+      Papa.parse<string[]>(src, {
+        header: false,
+        skipEmptyLines: false,
+        step: (result) => { allRows.push(result.data as string[]); },
+        complete: () => {
+          const trimmed = allRows.map((row, i) =>
+            i === 0 ? row : row.map((cell) => cell.trim()),
+          );
+          const blob = new Blob([Papa.unparse(trimmed)], { type: 'text/csv' });
+          resolve(new File([blob], src.name, { type: 'text/csv' }));
+        },
+        error: reject,
+      });
+    });
+  }
+
   function buildFilteredCsv(src: File, badRows: Set<number>): Promise<File> {
     return new Promise((resolve, reject) => {
       const parts: string[] = [];
@@ -483,16 +509,18 @@ export default function Upload() {
     }
   }
 
-  function handleUpload() {
+  async function handleUpload() {
     if (!file) return;
-    doUpload(file);
+    const trimmed = await buildTrimmedCsv(file);
+    doUpload(trimmed);
   }
 
   async function handleUploadFiltered() {
     if (!file || !validation) return;
     setIsFiltering(true);
     try {
-      const filtered = await buildFilteredCsv(file, validation.badRowNums);
+      const trimmed = await buildTrimmedCsv(file);
+      const filtered = await buildFilteredCsv(trimmed, validation.badRowNums);
       setIsFiltering(false);
       doUpload(filtered, validation.badRowNums.size);
     } catch {
