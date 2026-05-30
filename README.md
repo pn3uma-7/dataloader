@@ -16,6 +16,29 @@ Internal web application for loading CSV files into RDS PostgreSQL tables — wi
 | **Inject** | Creates a new PostgreSQL table and streams the S3 file directly into it |
 | **History** | Unified log of all uploads and injects with live progress for in-flight operations |
 
+## Data flow
+
+**Upload:**
+```
+Browser RAM
+  → buildTrimmedCsv()     re-parse + trim all values in browser (delay before progress bar)
+  → HTTP POST             file sent to backend
+  → EC2 RAM (multer)      held in memory — never written to EC2 disk
+  → S3                    streamed from EC2 RAM to private S3 bucket
+  → RDS                   upload_log entry written
+```
+
+**Inject:**
+```
+S3
+  → EC2 RAM (streaming)   S3 file streamed through — never stored on EC2 disk
+  → RDS                   streamed directly via COPY FROM STDIN (pg-copy-streams)
+```
+
+The file is **never written to EC2 disk** at any stage. During upload it lives briefly in EC2 RAM (~500 MB RAM needed for a 500 MB file — fits within t3.micro's 1 GB). During inject it is pure streaming with minimal memory footprint.
+
+The delay between clicking "Upload to S3" and the progress bar appearing is client-side trim processing (Papa Parse re-parsing the file in the browser), not a network or server delay. Once the progress bar appears, the file is at the backend and you can safely close the tab — the upload continues on the server.
+
 ---
 
 ## Tech stack
