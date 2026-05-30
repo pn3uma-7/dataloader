@@ -56,7 +56,22 @@ The delay between clicking "Upload to S3" and the progress bar appearing is clie
 
 ---
 
-## Local development
+## Ways to run
+
+The app supports four modes — no code changes needed between them, driven entirely by environment variables.
+
+| Mode | How | When to use |
+|---|---|---|
+| **npm local dev** | Two terminals: `npm run dev` in backend + frontend | Day-to-day development |
+| **Local Docker** | `docker compose --env-file .env.dev up --build` on laptop | Testing the Docker setup before deploying to EC2 |
+| **EC2 + Docker** | `docker compose` on EC2, CloudFront in front | Dev / QA / Production |
+| **EC2 without Docker** | `npm build` + nginx + PM2 on EC2 | If Docker is unavailable |
+
+> **Mock auth (no Cognito needed):** If `COGNITO_USER_POOL_ID` is not set **and** `NODE_ENV=development`, the backend injects a mock `data-loader-dev` user automatically. S3 and RDS are still required.
+
+---
+
+## Local development (npm)
 
 ### Prerequisites
 - Node.js 20
@@ -99,6 +114,21 @@ cd frontend && npm run dev
 Open `http://localhost:5173` → Cognito login → full app.
 
 > **Cognito callback URL:** Add `http://localhost:5173/` to your App Client's allowed callback and sign-out URLs.
+
+---
+
+## Local Docker
+
+Useful for testing the container setup before pushing to EC2. Requires Docker Desktop.
+
+```bash
+cp .env.dev.example .env.dev   # fill in real AWS values
+docker compose --env-file .env.dev -p dataloader-dev up --build
+```
+
+App runs at `http://localhost:8080`. Containers connect to real AWS (S3, RDS, Cognito).
+
+> **Cognito callback URL:** Add `http://localhost:8080/` to your App Client's allowed callback and sign-out URLs.
 
 ---
 
