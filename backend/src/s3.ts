@@ -17,6 +17,7 @@ export async function uploadToS3(
 ): Promise<void> {
   const total = body.length;
   const pass = new PassThrough();
+  pass.on('error', () => {}); // prevent unhandled error crash if upload fails mid-stream
 
   const upload = new Upload({
     client: s3,
@@ -31,7 +32,7 @@ export async function uploadToS3(
     let sent = 0;
 
     const writeNext = () => {
-      if (sent >= total) { pass.end(); return; }
+      if (pass.destroyed || sent >= total) { if (!pass.destroyed) pass.end(); return; }
       const end = Math.min(sent + chunkSize, total);
       const ok = pass.write(body.slice(sent, end));
       sent = end;
