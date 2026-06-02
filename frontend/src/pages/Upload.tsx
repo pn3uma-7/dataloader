@@ -33,7 +33,7 @@ const MAX_DUP_ROWS = Infinity;
 const MAX_EXAMPLES = 5;
 
 // Literal strings treated as "null" in data — blocked as hard errors
-const NULL_LIKE = new Set(['null', 'none', 'n/a', 'na', 'nil', 'undefined', 'nan']);
+const NULL_LIKE = new Set(['null', 'none', 'nil', 'undefined', 'nan']);
 
 // Dangerous characters that break CSV structure — blocked in all non-ID columns
 const DANGEROUS_RE = /[,"\n\r]/;
@@ -166,7 +166,7 @@ function runValidation(
       if (nullLikeCount > 0) {
         issues.push({
           severity: 'error',
-          title: `${nullLikeCount.toLocaleString()} null-like value${nullLikeCount > 1 ? 's' : ''} found (null, none, N/A, etc.)`,
+          title: `${nullLikeCount.toLocaleString()} null-like value${nullLikeCount > 1 ? 's' : ''} found (null, none, nan, etc.)`,
           examples: nullLikeExamples,
         });
       }
