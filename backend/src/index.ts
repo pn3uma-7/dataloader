@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
 import { initDb } from './db';
 import uploadRouter from './routes/upload';
 import injectRouter from './routes/inject';
@@ -19,6 +20,11 @@ app.use('/api', historyRouter);
 app.use('/api', s3filesRouter);
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+
+// Serve React frontend — must be after all API routes
+const publicDir = path.join(__dirname, '..', 'public');
+app.use(express.static(publicDir));
+app.get('*', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
 
 async function start() {
   try {
