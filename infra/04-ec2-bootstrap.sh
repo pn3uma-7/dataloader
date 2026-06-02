@@ -4,10 +4,10 @@
 # Tested: Amazon Linux 2023, t3.micro, ap-south-1, May 2026.
 #
 # Pre-requisites (done in AWS Console before running this):
-#   - EC2 security group: inbound 22 + 8080 from 0.0.0.0/0
-#   - IAM role with S3 read/write attached to EC2
-#   - RDS security group: inbound 5432 from EC2 security group
-#   - CloudFront distribution pointing to ec2-<ip>.<region>.compute.amazonaws.com:8080
+#   - EC2 security group: inbound 22 (SSH) + 3000 (app) from 0.0.0.0/0
+#   - IAM role with S3 read/write/list + delete attached to EC2
+#   - RDS security group: inbound 5432 from EC2 *security group* (not IP)
+#   - CloudFront distribution pointing to ec2-<ip>.<region>.compute.amazonaws.com:3000
 #   - Cognito callback URLs updated with https://<cloudfront-domain>/
 
 set -e
@@ -32,7 +32,7 @@ sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 
 # ── 4. Clone repo ────────────────────────────────────────────────────────────
 cd /home/ec2-user
-git clone https://github.com/aqilliz-dev/data-uploader-application.git dataloader
+git clone https://github.com/pn3uma-7/dataloader.git dataloader
 sudo chown -R ec2-user:ec2-user dataloader
 
 # ── 5. Print next steps ───────────────────────────────────────────────────────
@@ -41,14 +41,20 @@ echo "========================================================="
 echo "Bootstrap complete. Next steps (as ec2-user):"
 echo ""
 echo "  cd ~/dataloader"
-echo "  cp .env.dev.example .env.dev   # fill in real values"
-echo "  cp .env.qa.example  .env.qa    # fill in real values"
 echo ""
-echo "  # Start dev (port 8080)"
-echo "  sudo docker compose --env-file .env.dev -p dataloader-dev up -d --build"
+echo "  # Create backend/.env with real values (see infra/05-deployment-notes.md)"
+echo "  nano backend/.env"
 echo ""
-echo "  # Start QA (port 8081)"
-echo "  sudo docker compose --env-file .env.qa -p dataloader-qa up -d --build"
+echo "  # Build Docker image (build context = project root)"
+echo "  docker build -t dataloader-backend -f backend/Dockerfile ."
+echo ""
+echo "  # Start container"
+echo "  docker run -d --name dataloader --restart unless-stopped \\"
+echo "    -p 3000:3000 --env-file ./backend/.env dataloader-backend"
+echo ""
+echo "  # Verify"
+echo "  docker logs dataloader --tail 20"
+echo "  curl http://localhost:3000/api/health"
 echo ""
 echo "  # Access via CloudFront HTTPS domain (required for Cognito)"
 echo "  https://<cloudfront-domain>/"

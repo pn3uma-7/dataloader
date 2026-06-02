@@ -51,7 +51,7 @@ The delay between clicking "Upload to S3" and the progress bar appearing is clie
 | Storage | AWS S3 (private bucket, backend proxy only) |
 | Database | AWS RDS PostgreSQL |
 | Progress | Server-Sent Events (SSE) for upload and inject |
-| Deployment | Docker Compose — nginx (frontend + `/api` proxy) + Node backend |
+| Deployment | Docker — single container; Express serves frontend static files + API |
 | CDN / HTTPS | AWS CloudFront (required for Cognito PKCE callback URLs) |
 
 ---
@@ -64,7 +64,7 @@ The app supports four modes — no code changes needed between them, driven enti
 |---|---|---|
 | **npm local dev** | Two terminals: `npm run dev` in backend + frontend | Day-to-day development |
 | **Local Docker** | `docker compose --env-file .env.dev up --build` on laptop | Testing the Docker setup before deploying to EC2 |
-| **EC2 + Docker** | `docker compose` on EC2, CloudFront in front | Dev / QA / Production |
+| **EC2 + Docker** | Single `docker run` on EC2, CloudFront in front | Dev / QA / Production |
 | **EC2 without Docker** | `npm build` + nginx + PM2 on EC2 | If Docker is unavailable |
 
 > **Mock auth (no Cognito needed):** If `COGNITO_USER_POOL_ID` is not set **and** `NODE_ENV=development`, the backend injects a mock `data-loader-dev` user automatically. S3 and RDS are still required.
@@ -132,55 +132,88 @@ App runs at `http://localhost:8080`. Containers connect to real AWS (S3, RDS, Co
 
 ---
 
-## AWS deployment (Docker Compose)
+## AWS deployment (Docker — single container)
 
-### Infrastructure required per environment
+### Architecture
+
+```
+Browser → CloudFront → EC2:3000 → Express (serves React SPA + /api/*)
+                                         ↓              ↓
+                                       S3 (data)    RDS PostgreSQL
+```
+
+The React frontend and Express API are bundled into one Docker image. Express serves the React build from `/public` and handles all `/api/*` routes. No nginx, no separate frontend bucket.
+
+### Infrastructure required
 
 | Resource | Notes |
 |---|---|
-| EC2 (Amazon Linux 2023, t3.micro) | Public subnet; security group: port 22 + 8080 open |
-| IAM role | S3 read/write/list — attach to EC2 |
-| S3 bucket | One per environment |
-| RDS PostgreSQL | Existing instance; create `dataloader_dev` / `dataloader_qa` databases |
-| Cognito User Pool | One pool, one App Client per environment |
-| CloudFront | Points to EC2 DNS:8080; required for HTTPS (Cognito mandates it) |
+| EC2 (Amazon Linux 2023, t3.micro) | Public subnet; security group: port 22 + 3000 inbound |
+| IAM role | S3 read/write/list — attach to EC2 instance |
+| S3 bucket | One private bucket for CSV data |
+| RDS PostgreSQL | Security group must allow port 5432 from EC2 |
+| Cognito User Pool | One pool + App Client; callback URLs must include CloudFront domain |
+| CloudFront | Single origin: EC2 DNS on port 3000; required for HTTPS (Cognito mandates it) |
 
-> **CloudFront is mandatory.** Cognito PKCE rejects `http://` callback URLs for non-localhost. Use the free `*.cloudfront.net` domain — no custom domain needed for dev/QA.
+> **CloudFront is mandatory.** Cognito PKCE rejects `http://` callback URLs for non-localhost.
 
-### Quick deploy
+### First-time EC2 setup
 
 ```bash
-# 1. Bootstrap EC2 (installs Docker, Docker Compose, clones repo)
-curl -s https://raw.githubusercontent.com/aqilliz-dev/data-uploader-application/master/infra/04-ec2-bootstrap.sh | sudo bash
+# 1. Bootstrap EC2 (installs Docker + git, clones repo)
+curl -s https://raw.githubusercontent.com/pn3uma-7/dataloader/master/infra/04-ec2-bootstrap.sh | sudo bash
 
-# 2. Fill env file
+# Re-login so docker group takes effect
+exit  # then SSH back in
+
+# 2. Create .env with real values (only needed once — not in git)
 cd ~/dataloader
-cp .env.dev.example .env.dev
-nano .env.dev   # fill in real values
+cat > backend/.env << 'EOF'
+AWS_REGION=ap-south-1
+S3_BUCKET=<your-bucket>
+COGNITO_USER_POOL_ID=<pool-id>
+COGNITO_APP_CLIENT_ID=<client-id>
+DB_HOST=<rds-endpoint>
+DB_PORT=5432
+DB_NAME=postgres
+DB_USER=postgres
+DB_PASSWORD=<password>
+PORT=3000
+NODE_ENV=production
+EOF
 
-# 3. Start
-sudo docker compose --env-file .env.dev -p dataloader-dev up -d --build
+# 3. Build and start
+docker build -t dataloader-backend -f backend/Dockerfile .
+docker run -d --name dataloader --restart unless-stopped \
+  -p 3000:3000 --env-file ./backend/.env dataloader-backend
 ```
 
-Access at `https://<cloudfront-domain>/`
+### Redeploy after a code push
 
-### Env file reference
+```bash
+cd ~/dataloader && git pull && \
+docker build -t dataloader-backend -f backend/Dockerfile . && \
+(docker stop dataloader && docker rm dataloader; true) && \
+docker run -d --name dataloader --restart unless-stopped \
+  -p 3000:3000 --env-file ./backend/.env dataloader-backend && \
+docker logs dataloader --tail 20
+```
+
+### .env reference
 
 | Variable | Description |
 |---|---|
 | `AWS_REGION` | e.g. `ap-south-1` |
-| `S3_BUCKET` | Name of the private S3 bucket |
+| `S3_BUCKET` | Name of the private S3 data bucket |
 | `COGNITO_USER_POOL_ID` | Cognito User Pool ID |
-| `COGNITO_APP_CLIENT_ID` | Cognito App Client ID (same for backend + frontend) |
+| `COGNITO_APP_CLIENT_ID` | Cognito App Client ID |
 | `DB_HOST` | RDS endpoint |
 | `DB_PORT` | `5432` |
-| `DB_NAME` | Database name (e.g. `dataloader_dev`) |
+| `DB_NAME` | Database name |
 | `DB_USER` | Database username |
 | `DB_PASSWORD` | Database password |
-| `VITE_COGNITO_USER_POOL_ID` | Same as `COGNITO_USER_POOL_ID` |
-| `VITE_COGNITO_APP_CLIENT_ID` | Same as `COGNITO_APP_CLIENT_ID` |
-| `VITE_COGNITO_DOMAIN` | Cognito Hosted UI domain |
-| `APP_PORT` | Host port nginx binds to (e.g. `8080` for dev, `8081` for QA) |
+| `PORT` | `3000` |
+| `NODE_ENV` | `production` |
 
 ---
 
@@ -211,7 +244,9 @@ All scripts are in `infra/`:
 - **First column** — hashed ID: must be SHA-256 (64-char hex) or UUID (if column name contains "device")
 - **Other columns** — any value allowed except `,` `"` and newlines (these break CSV structure)
 - **Leading/trailing whitespace** — auto-trimmed before S3 upload
-- **Blank cells, null-like values, duplicate rows** — flagged as errors at upload
+- **Blank/empty cells** (`,, ` or `, ,`) — flagged as errors at upload
+- **Null-like programming values** — `null`, `none`, `nan`, `nil`, `undefined` flagged as errors; `NA`, `N/A`, `Not Applicable` are **allowed**
+- **Duplicate rows** — flagged as errors at upload
 
 ---
 
